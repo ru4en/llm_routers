@@ -1,0 +1,11 @@
+__pycache__
+.venv
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info
+*.egg
+*.whl
+*.mypy_cache
+*.pytest_cache
