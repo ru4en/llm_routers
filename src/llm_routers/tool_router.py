@@ -9,6 +9,6 @@ class ToolRouter(Router):
         classifier: str = "zero-shot-classification",
         model: str = "facebook/bart-large-mnli",
         n: int = 3,
-        threshold: float = 0.08,
+        threshold: float = 0.1,
     ) -> None:
         super().__init__(tools, classifier, model, n, threshold)

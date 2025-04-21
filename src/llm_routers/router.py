@@ -13,10 +13,11 @@ class Router:
         model: str = "facebook/bart-large-mnli",
         n: int = 1,
         threshold: float = 0.1,
+        device: int = 0,  # Use GPU by default (device=0)
     ) -> None:
         self.candidates: Dict[str, str] = candidates
         self.model: str = model
-        self.classifier: Any = pipeline(classifier, model=model)
+        self.classifier: Any = pipeline(classifier, model=model, device=device)
         self.n: int = n
         self.threshold: float = threshold
 
@@ -35,5 +36,5 @@ class Router:
         sorted_scores: List[Tuple[str, float]] = sorted(score_dict.items(), key=lambda item: item[1], reverse=True)
         filtered_scores: List[Tuple[str, float]] = [(k, v) for k, v in sorted_scores if v >= self.threshold]
         
-        return filtered_scores[:self.n]
+        return filtered_scores
 
