@@ -4,4 +4,6 @@ Version: 0.1.0
 Summary: Simple library to do Agent/Model routing, tool routing and gurdrails for LLMs
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
+License-File: LICENSE
 Requires-Dist: transformers
+Dynamic: license-file
