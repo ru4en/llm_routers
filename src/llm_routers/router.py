@@ -26,13 +26,17 @@ class Router:
             "pipeline": "zero-shot-classification",
             "model": "facebook/bart-large-mnli",
         },
-        "sentiment": {
-            "pipeline": "sentiment-analysis",
-            "model": "distilbert-base-uncased-finetuned-sst-2-english",
+        "zero-shot-custom-tool-router": {
+            "pipeline": "zero-shot-classification",
+            "model": "ru4en/bart-large-mnli-tool-router",
         },
-        "ner": {
-            "pipeline": "ner",
-            "model": "dbmdz/bert-large-cased-finetuned-conll03-english",
+        "zero-shot-custom-agent-router": {
+            "pipeline": "zero-shot-classification",
+            "model": "ru4en/bart-large-mnli-agent-router",
+        },
+        "zero-shot-custom-security-router": {
+            "pipeline": "zero-shot-classification",
+            "model": "ru4en/bart-large-mnli-security-router",
         }
     }
     
