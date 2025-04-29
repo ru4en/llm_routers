@@ -157,7 +157,8 @@ class Router:
             self.classifier = pipeline(
                 self.pipeline_name, 
                 model=self.model_name, 
-                device=self.device
+                device=self.device,
+                token=os.getenv("HUGGINGFACE_TOKEN", None)
             )
             logging.info("Model initialized successfully")
         except Exception as e:
