@@ -8,4 +8,8 @@ __pycache__
 *.egg
 *.whl
 *.mypy_cache
-*.pytest_cache
+*.pytest_cache#
+
+./build
+./dist
+./src/*.egg-info

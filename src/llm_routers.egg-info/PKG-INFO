@@ -1,8 +1,8 @@
 Metadata-Version: 2.4
 Name: llm_routers
-Version: 0.1.0
+Version: 0.1.2
 Summary: Simple library to do Agent/Model routing, tool routing and gurdrails for LLMs
-Requires-Python: >=3.12
+Requires-Python: >=3.11.11
 Description-Content-Type: text/markdown
 License-File: LICENSE
 Requires-Dist: transformers
