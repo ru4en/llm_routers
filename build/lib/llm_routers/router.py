@@ -154,43 +154,53 @@ class Router:
         original_model_name = self.model_name
         
         # Import here to avoid loading transformers until needed
-        from transformers import pipeline
+        try:
+            from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+        except ImportError as e:
+            self.logger.error(f"Failed to import required classes from transformers: {e}")
+            self.logger.error("Please install transformers with: pip install transformers")
+            raise ImportError("The transformers library is required but couldn't be imported. Please install it with: pip install transformers")
         
-        # Try to fix common model name issues
-        if "-V2" in original_model_name.upper():
-            corrected_name = original_model_name.replace("-V2", "").replace("-v2", "")
-            self.logger.warning(f"Detected 'V2' suffix in model name. Trying with corrected name: {corrected_name}")
-            self.model_name = corrected_name
-        
-        # First attempt with the specified or corrected model
+        # First attempt with user-specified model
         try:
             self.logger.info(f"Initializing model: {self.model_name}")
-            self.classifier = pipeline(
-                self.pipeline_name,
-                model=self.model_name,
-                device=self.device,
-                token=os.getenv("HUGGINGFACE_TOKEN")
-            )
-            self.logger.info("Model initialization successful")
-            return
+            
+            # Use token if available
+            hf_token = os.getenv("HUGGINGFACE_TOKEN")
+            
+            try:
+                # First check if tokenizer can be loaded
+                tokenizer = AutoTokenizer.from_pretrained(self.model_name, token=hf_token)
+                
+                self.classifier = pipeline(
+                    self.pipeline_name,
+                    model=self.model_name,
+                    device=self.device,
+                    token=hf_token
+                )
+                self.logger.info("Model initialization successful")
+                return
+            except Exception as e:
+                self.logger.warning(f"Failed to load specified model: {e}")
         except Exception as e:
             self.logger.warning(f"Failed to load specified model: {e}")
         
-        # Fallback to default model
+        # Always fall back to the standard Facebook model which is known to work
         try:
-            fallback_model = self.DEFAULT_MODEL["model"]
-            self.logger.warning(f"Attempting to use fallback model: {fallback_model}")
+            fallback_model = "facebook/bart-large-mnli"
+            self.logger.warning(f"Falling back to standard model: {fallback_model}")
             self.model_name = fallback_model
             self.classifier = pipeline(
                 self.pipeline_name,
                 model=fallback_model,
-                device=self.device,
-                token=os.getenv("HUGGINGFACE_TOKEN")
+                device=self.device
             )
             self.logger.info("Fallback model initialization successful")
+            return
         except Exception as e:
-            self.logger.error(f"All model initialization attempts failed")
-            raise RuntimeError(f"Model initialization failed: {str(e)}. Original model '{original_model_name}' and fallback model also failed.")
+            error_msg = f"Failed to initialize any model. Last error: {str(e)}"
+            self.logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
     def _async_init_and_process(self) -> None:
         """Initialize model and process queue in background thread."""

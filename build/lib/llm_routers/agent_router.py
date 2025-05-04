@@ -8,7 +8,7 @@ class AgentRouter(Router):
     
     DEFAULT_MODEL = {
         "pipeline": "zero-shot-classification",
-        "model": "ru4en/bart-large-mnli-agent-router-v2"
+        "model": "facebook/bart-large-mnli"
     }
     
     def __init__(
