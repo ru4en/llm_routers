@@ -1,8 +1,3 @@
-"""
-Efficient router classes for text routing using transformer models.
-Provides base Router class and specialized AgentRouter and ToolRouter classes.
-"""
-
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Callable, Any
@@ -13,6 +8,7 @@ import threading
 import queue
 import time
 from concurrent.futures import ThreadPoolExecutor
+import re
 
 class Router:
     """
@@ -38,10 +34,12 @@ class Router:
         verbose: bool = False,
         async_mode: bool = True,
         max_cache_size: int = 1000,
-        max_workers: int = 2
+        max_workers: int = 2,
+        use_multithreading: bool = True,
+        fallback_on_error: bool = True
     ) -> None:
         """
-        Initialize the Router.
+        Initialise the Router.
         
         Args:
             candidates: Dictionary of handler names to descriptions
@@ -55,6 +53,8 @@ class Router:
             async_mode: Use asynchronous processing for classification
             max_cache_size: Maximum number of cached results
             max_workers: Maximum number of worker threads
+            use_multithreading: Enable multithreading for async mode
+            fallback_on_error: Use fallback classifier if transformer model fails
         """
         # Configure logging
         logging_level = logging.DEBUG if verbose else logging.WARNING
@@ -86,13 +86,17 @@ class Router:
         self.async_mode = async_mode
         self.max_workers = max_workers
         self.max_cache_size = max_cache_size
+        self.use_multithreading = use_multithreading
+        self.fallback_on_error = fallback_on_error
         
-        # Initialize the model, either async or sync
+        # Initialize state variables
         self.classifier = None
         self._model_initialized = threading.Event()
+        self._using_fallback = False
+        self._transformer_available = self._check_transformers()
         
         # Initialize async resources if needed
-        if self.async_mode:
+        if self.async_mode and self.use_multithreading:
             self._thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)
             self._request_queue = queue.Queue()
             self._result_cache = {}
@@ -105,10 +109,20 @@ class Router:
                 self._init_thread.daemon = True
                 self._init_thread.start()
         
-        # Directly initialize model in sync mode
+        # Directly initialize model in sync mode or when multithreading is disabled
         elif self.candidates:
             self._initialize_model()
             self._model_initialized.set()
+    
+    def _check_transformers(self) -> bool:
+        """Check if transformers library is available."""
+        try:
+            # Try importing transformers without using the pipeline
+            import transformers
+            return True
+        except ImportError:
+            self.logger.warning("Transformers library not available. Will use fallback classifier.")
+            return False
     
     def _resolve_device(self, device: Union[int, str]) -> Union[int, str]:
         """Determine the appropriate compute device."""
@@ -151,57 +165,119 @@ class Router:
     
     def _initialize_model(self) -> None:
         """Initialize the classification model with fallback options."""
-        original_model_name = self.model_name
-        
-        # Import here to avoid loading transformers until needed
-        try:
-            from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
-        except ImportError as e:
-            self.logger.error(f"Failed to import required classes from transformers: {e}")
-            self.logger.error("Please install transformers with: pip install transformers")
-            raise ImportError("The transformers library is required but couldn't be imported. Please install it with: pip install transformers")
-        
-        # First attempt with user-specified model
-        try:
-            self.logger.info(f"Initializing model: {self.model_name}")
+        # If transformers is not available, use fallback immediately
+        if not self._transformer_available:
+            self.logger.info("Using fallback keyword-based classifier")
+            self._initialize_fallback_classifier()
+            return
             
-            # Use token if available
-            hf_token = os.getenv("HUGGINGFACE_TOKEN")
+        try:
+            # First try the standard import approach
+            try:
+                from transformers import pipeline
+                self.logger.info(f"Initializing model: {self.model_name}")
+                
+                # Attempt to initialize pipeline directly
+                try:
+                    hf_token = os.getenv("HUGGINGFACE_TOKEN")
+                    self.classifier = pipeline(
+                        self.pipeline_name,
+                        model=self.model_name,
+                        device=self.device,
+                        token=hf_token
+                    )
+                    self.logger.info("Model initialization successful")
+                    return
+                except Exception as e:
+                    self.logger.warning(f"Standard pipeline initialization failed: {e}")
+                    # Continue to alternative approach
+            except ImportError:
+                self.logger.warning("Could not import pipeline directly, trying alternative approach")
+            
+            # Alternative approach: load model and tokenizer separately
+            from transformers import AutoTokenizer, AutoModelForSequenceClassification
             
             try:
-                # First check if tokenizer can be loaded
+                hf_token = os.getenv("HUGGINGFACE_TOKEN")
                 tokenizer = AutoTokenizer.from_pretrained(self.model_name, token=hf_token)
+                model = AutoModelForSequenceClassification.from_pretrained(self.model_name, token=hf_token)
                 
+                # Handle device placement
+                try:
+                    model = model.to(self.device)
+                except Exception as device_err:
+                    self.logger.warning(f"Failed to move model to device {self.device}: {device_err}. Using CPU.")
+                    model = model.to("cpu")
+                
+                # Try loading pipeline with explicit model and tokenizer
+                from transformers import pipeline
                 self.classifier = pipeline(
                     self.pipeline_name,
-                    model=self.model_name,
-                    device=self.device,
-                    token=hf_token
+                    model=model,
+                    tokenizer=tokenizer,
+                    device="cpu"  # Fall back to CPU which always works
                 )
-                self.logger.info("Model initialization successful")
+                self.logger.info("Model initialization successful with alternative approach")
                 return
+                
             except Exception as e:
-                self.logger.warning(f"Failed to load specified model: {e}")
+                self.logger.error(f"Alternative model initialization failed: {e}")
+                # Fall through to fallback classifier
+            
         except Exception as e:
-            self.logger.warning(f"Failed to load specified model: {e}")
+            self.logger.error(f"All transformer initialization methods failed: {e}")
+            
+        # If all attempts failed and fallback is enabled, use the fallback classifier
+        if self.fallback_on_error:
+            self.logger.warning("Using fallback classifier due to transformer model initialization failures")
+            self._initialize_fallback_classifier()
+        else:
+            raise RuntimeError("Failed to initialize transformer model and fallback is disabled")
+    
+    def _initialize_fallback_classifier(self) -> None:
+        """Initialize a simple keyword-based fallback classifier."""
+        self._using_fallback = True
+        self.classifier = self._fallback_classify
+        self.logger.info("Fallback classifier initialized")
+    
+    def _fallback_classify(self, query: str, candidate_labels: List[str], multi_label: bool = False) -> Dict:
+        """Simple keyword-based fallback classifier."""
+        # Clean query of punctuation and convert to lowercase for simple matching
+        query_terms = re.sub(r'[^\w\s]', '', query.lower()).split()
         
-        # Always fall back to the standard Facebook model which is known to work
-        try:
-            fallback_model = "facebook/bart-large-mnli"
-            self.logger.warning(f"Falling back to standard model: {fallback_model}")
-            self.model_name = fallback_model
-            self.classifier = pipeline(
-                self.pipeline_name,
-                model=fallback_model,
-                device=self.device
-            )
-            self.logger.info("Fallback model initialization successful")
-            return
-        except Exception as e:
-            error_msg = f"Failed to initialize any model. Last error: {str(e)}"
-            self.logger.error(error_msg)
-            raise RuntimeError(error_msg)
-
+        # Calculate simple term frequency scores
+        scores = []
+        labels = []
+        
+        for label in candidate_labels:
+            # Clean label of punctuation and convert to lowercase
+            label_terms = re.sub(r'[^\w\s]', '', label.lower()).split()
+            
+            # Calculate simple similarity score based on term overlap
+            matches = sum(1 for term in query_terms if term in label_terms)
+            unique_terms = len(set(query_terms + label_terms))
+            
+            # Simple Jaccard similarity with a minimum score floor
+            score = max(0.05, matches / unique_terms if unique_terms > 0 else 0)
+            
+            scores.append(score)
+            labels.append(label)
+        
+        # Normalize scores to sum to 1.0
+        total = sum(scores) or 1.0  # Avoid division by zero
+        normalized_scores = [score/total for score in scores]
+        
+        # Sort by score in descending order
+        sorted_indices = sorted(range(len(normalized_scores)), key=lambda i: normalized_scores[i], reverse=True)
+        sorted_labels = [labels[i] for i in sorted_indices]
+        sorted_scores = [normalized_scores[i] for i in sorted_indices]
+        
+        return {
+            "labels": sorted_labels,
+            "scores": sorted_scores,
+            "sequence": query
+        }
+    
     def _async_init_and_process(self) -> None:
         """Initialize model and process queue in background thread."""
         try:
@@ -216,6 +292,9 @@ class Router:
                 try:
                     # Get item with timeout to allow checking shutdown flag
                     item = self._request_queue.get(timeout=0.5)
+                    if item is None:  # Special signal to end processing
+                        break
+                        
                     query, callback, request_id = item
                     
                     # Check cache first
@@ -258,15 +337,19 @@ class Router:
                     
         except Exception as e:
             self.logger.error(f"Fatal error in async worker: {str(e)}")
+            # Still mark the model as initialized, but with the fallback classifier
+            if not self._model_initialized.is_set():
+                self._initialize_fallback_classifier()
+                self._model_initialized.set()
             self._worker_initialized = False
-
+    
     def _classify_query(self, query: str) -> List[Tuple[str, float]]:
         """Perform the actual classification."""
         if not query.strip() or not self.candidates:
             return []
             
         try:
-            # Get scores using zero-shot classification
+            # Get scores using classification
             result = self.classifier(
                 query,
                 candidate_labels=list(self.candidates.values()),
@@ -287,6 +370,13 @@ class Router:
             
         except Exception as e:
             self.logger.error(f"Classification error: {str(e)}")
+            
+            # If using transformers and it failed, try fallback
+            if not self._using_fallback and self.fallback_on_error:
+                self.logger.warning("Switching to fallback classifier for this query")
+                self._initialize_fallback_classifier()
+                return self._classify_query(query)  # Retry with fallback
+                
             return []
 
     def route_query(
@@ -317,17 +407,22 @@ class Router:
             return []
         
         # For async mode with callback, add to queue and return immediately
-        if self.async_mode and callback:
+        if self.async_mode and callback and self.use_multithreading:
             self._request_queue.put((query, callback, request_id))
             return []
             
         # For async mode without callback, use thread pool with timeout
-        elif self.async_mode:
-            # Wait for worker to initialize if needed (with timeout)
-            if not self._model_initialized.wait(timeout=timeout):
-                self.logger.error("Timed out waiting for model to initialize")
-                return []
-                
+        elif self.async_mode and self.use_multithreading:
+            # If the model isn't initialized yet, try waiting with timeout
+            model_ready = self._model_initialized.wait(timeout=timeout)
+            
+            if not model_ready:
+                self.logger.warning("Model initialization timeout, using fallback")
+                # Initialize fallback classifier if needed
+                if not self._using_fallback:
+                    self._initialize_fallback_classifier()
+                    self._model_initialized.set()
+            
             # Check cache first for direct return
             cache_key = f"{query}_{str(self.candidates.keys())}"
             if cache_key in self._result_cache:
@@ -342,15 +437,38 @@ class Router:
                     self._result_cache[cache_key] = result
                 return result
             except TimeoutError:
-                self.logger.warning(f"Classification timed out after {timeout} seconds")
-                return []
+                self.logger.warning(f"Classification timed out after {timeout} seconds, using fallback")
+                # Initialize fallback classifier if needed
+                if not self._using_fallback and self.fallback_on_error:
+                    self._initialize_fallback_classifier()
+                return self._classify_query(query)  # Try with fallback
+        
+        # For async mode with multithreading disabled, process synchronously
+        elif self.async_mode and not self.use_multithreading:
+            # If the model isn't initialized yet, try waiting with timeout
+            model_ready = self._model_initialized.wait(timeout=timeout)
+            
+            if not model_ready:
+                self.logger.warning("Model initialization timeout, using fallback")
+                # Initialize fallback classifier if needed
+                if not self._using_fallback:
+                    self._initialize_fallback_classifier()
+                    self._model_initialized.set()
+                    
+            return self._classify_query(query)
                 
         # For sync mode, do classification directly
         else:
-            # Wait for model to initialize if needed
-            if not self._model_initialized.wait(timeout=timeout):
-                self.logger.error("Timed out waiting for model to initialize")
-                return []
+            # If the model isn't initialized yet, try waiting with timeout
+            model_ready = self._model_initialized.wait(timeout=timeout)
+            
+            if not model_ready:
+                self.logger.warning("Model initialization timeout, using fallback")
+                # Initialize fallback classifier if needed
+                if not self._using_fallback:
+                    self._initialize_fallback_classifier()
+                    self._model_initialized.set()
+                    
             return self._classify_query(query)
     
     def batch_route(
@@ -378,25 +496,56 @@ class Router:
             return []
         
         # For async batch processing with callback
-        if self.async_mode and callback:
+        if self.async_mode and callback and self.use_multithreading:
             def process_batch():
                 results = []
-                for i in range(0, len(queries), batch_size):
-                    batch = queries[i:i+batch_size]
-                    # In async mode, we need to process each query individually
-                    # and collect results because the model's batch processing
-                    # is happening in a separate thread
+                batched_queries = [queries[i:i+batch_size] for i in range(0, len(queries), batch_size)]
+                
+                try:
+                    # Setup progress tracking if requested
+                    if show_progress:
+                        from tqdm import tqdm
+                        batched_queries = tqdm(batched_queries, desc="Processing batches")
+                except ImportError:
+                    pass
+                    
+                for batch in batched_queries:
                     batch_results = []
                     for q in batch:
-                        result = self._classify_query(q)
-                        batch_results.append(result)
+                        try:
+                            # Wait for model to be ready
+                            if not self._model_initialized.is_set():
+                                if not self._model_initialized.wait(timeout=5.0):
+                                    self.logger.warning("Model initialization timeout in batch processing")
+                                    if not self._using_fallback and self.fallback_on_error:
+                                        self._initialize_fallback_classifier()
+                                        self._model_initialized.set()
+                                        
+                            result = self._classify_query(q)
+                            batch_results.append(result)
+                        except Exception as e:
+                            self.logger.error(f"Error in batch query: {e}")
+                            batch_results.append([])  # Empty result on error
+                            
                     results.extend(batch_results)
-                callback(results, request_id)
+                    
+                try:
+                    callback(results, request_id)
+                except Exception as e:
+                    self.logger.error(f"Error in batch callback: {e}")
                 
             # Start a thread to process the entire batch
             threading.Thread(target=process_batch).start()
             return []
-            
+        
+        # Make sure the model is initialized
+        if not self._model_initialized.is_set():
+            if not self._model_initialized.wait(timeout=10.0):
+                self.logger.warning("Model initialization timeout")
+                if not self._using_fallback and self.fallback_on_error:
+                    self._initialize_fallback_classifier()
+                    self._model_initialized.set()
+        
         # For synchronous processing
         results = []
         iterator = range(0, len(queries), batch_size)
@@ -411,17 +560,17 @@ class Router:
         for i in iterator:
             batch = queries[i:i + batch_size]
             
-            # For larger batches, use true batch processing with the model
-            if self.async_mode:
-                # For async mode without callback, we process each query individually
-                batch_results = []
-                for q in batch:
+            # Process each query and handle errors individually
+            batch_results = []
+            for q in batch:
+                try:
                     result = self.route_query(q)
                     batch_results.append(result)
-                results.extend(batch_results)
-            else:
-                # For sync mode, use model's batch capabilities if implemented
-                results.extend(self.route_query(q) for q in batch)
+                except Exception as e:
+                    self.logger.error(f"Error processing query in batch: {e}")
+                    batch_results.append([])  # Empty result on error
+                    
+            results.extend(batch_results)
                 
         return results
     
@@ -429,7 +578,7 @@ class Router:
         """Add a new candidate handler."""
         self.candidates[name] = description
         # Clear cache since candidates have changed
-        if self.async_mode:
+        if self.async_mode and hasattr(self, '_result_cache'):
             self._result_cache.clear()
         self.logger.debug(f"Added candidate: {name}")
     
@@ -438,7 +587,7 @@ class Router:
         if name in self.candidates:
             del self.candidates[name]
             # Clear cache since candidates have changed
-            if self.async_mode:
+            if self.async_mode and hasattr(self, '_result_cache'):
                 self._result_cache.clear()
             self.logger.debug(f"Removed candidate: {name}")
             return True
@@ -469,21 +618,29 @@ class Router:
     
     def shutdown(self) -> None:
         """Shut down the router and its worker threads."""
-        if self.async_mode:
+        if self.async_mode and self.use_multithreading and hasattr(self, '_request_queue'):
             self._shutdown_flag = True
             try:
+                # Signal worker threads to stop with a None item
+                self._request_queue.put(None)
+                # Wait briefly for threads to finish
+                time.sleep(0.1)
                 self._thread_pool.shutdown(wait=False)
-            except:
+            except Exception as e:
+                self.logger.error(f"Error during shutdown: {e}")
                 pass
     
     def __del__(self):
         """Ensure resources are cleaned up."""
-        self.shutdown()
+        try:
+            self.shutdown()
+        except:
+            pass
     
     def __repr__(self) -> str:
+        mode = "fallback" if self._using_fallback else "transformer"
         return (f"{self.__class__.__name__}(candidates={len(self.candidates)}, "
                 f"model='{self.model_name}', "
+                f"mode='{mode}', "
                 f"threshold={self.threshold:.2f}, "
                 f"async_mode={self.async_mode})")
-
-
